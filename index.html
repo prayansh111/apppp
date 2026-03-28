@@ -1,43 +1,31 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P2P Sender (Phone)</title>
+    <title>P2P 100GB Sender</title>
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
     <style>
-        body { font-family: system-ui, sans-serif; background: #0f172a; color: white; text-align: center; padding: 20px; }
-        .box { background: #1e293b; max-width: 400px; margin: 40px auto; padding: 30px; border-radius: 20px; border: 1px solid #334155; }
-        button { background: #10b981; color: white; border: none; padding: 15px; border-radius: 10px; width: 100%; cursor: pointer; font-weight: bold; font-size: 16px; margin-top: 20px; }
-        input { width: 90%; padding: 15px; margin: 10px 0; text-align: center; font-size: 24px; border-radius: 10px; border: 2px solid #334155; background: #0f172a; color: white; }
-        #status { color: #94a3b8; margin-top: 20px; font-size: 14px; }
-        progress { width: 100%; height: 20px; margin-top: 20px; border-radius: 10px; }
-        .hidden { display: none; }
+        body { font-family: sans-serif; background: #0f172a; color: white; text-align: center; padding: 40px; }
+        .box { background: #1e293b; padding: 20px; border-radius: 15px; }
+        input, button { padding: 15px; margin: 10px; border-radius: 8px; border: none; font-size: 18px; }
+        button { background: #10b981; color: white; cursor: pointer; width: 250px; }
+        progress { width: 100%; height: 25px; margin-top: 20px; }
     </style>
 </head>
 <body>
     <div class="box">
-        <h2>📤 Send 100GB File</h2>
-        <div id="setupArea">
-            <p>Enter code from Mac Terminal:</p>
-            <input type="text" id="joinCode" maxlength="6" placeholder="000000">
-            <button id="btnConnect">Connect to Mac</button>
+        <h2>📤 Send to Mac</h2>
+        <input type="text" id="code" placeholder="6-Digit Code">
+        <button id="conn">Connect & Pair</button>
+        <div id="ui" style="display:none">
+            <input type="file" id="file">
+            <progress id="pg" value="0" max="100"></progress>
+            <p id="lab">Ready to Transfer</p>
         </div>
-
-        <div id="transferArea" class="hidden">
-            <h3 style="color: #4ade80;">✅ Linked to Mac</h3>
-            <input type="file" id="fileInput">
-            <progress id="progressBar" value="0" max="100"></progress>
-            <p id="progressLabel">Ready to send...</p>
-        </div>
-        
-        <p id="status">Waiting for input...</p>
     </div>
 
     <script>
-        // YOUR FIREBASE CONFIG
-        const firebaseConfig = {
+        const config = {
             apiKey: "AIzaSyDXUO76dZzB0lnhQIdvlQqhqd43gvd6968",
             authDomain: "fast-file-transfer-9ec05.firebaseapp.com",
             projectId: "fast-file-transfer-9ec05",
@@ -45,92 +33,44 @@
             messagingSenderId: "91596561473",
             appId: "1:91596561473:web:b4c66adb7fc77ebd1a3ac0"
         };
-
-        firebase.initializeApp(firebaseConfig);
+        firebase.initializeApp(config);
         const db = firebase.firestore();
         const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-        let dataChannel;
+        let dc;
 
-        // CONNECT TO MAC
-        document.getElementById('btnConnect').onclick = async () => {
-            const code = document.getElementById('joinCode').value;
-            if (code.length !== 6) return alert("Enter 6-digit code!");
-
-            document.getElementById('status').innerText = "Connecting...";
-            const roomRef = db.collection('rooms').doc(code);
-            const roomSnap = await roomRef.get();
-
-            if (!roomSnap.exists) return alert("Code not found in Cloud!");
-
-            // WebRTC Handshake
-            pc.onicecandidate = e => e.candidate && roomRef.collection('calleeCandidates').add(e.candidate.toJSON());
+        document.getElementById('conn').onclick = async () => {
+            const code = document.getElementById('code').value;
+            const ref = db.collection('rooms').doc(code);
+            const snap = await ref.get();
             
-            // Wait for Mac's Data Channel
-            pc.ondatachannel = (event) => {
-                dataChannel = event.channel;
-                setupChannel(dataChannel);
+            pc.ondatachannel = (e) => {
+                dc = e.channel;
+                dc.onopen = () => document.getElementById('ui').style.display = 'block';
             };
 
-            const data = roomSnap.data();
-            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            await roomRef.update({ answer });
-
-            // Listen for Mac's ICE candidates
-            roomRef.collection('callerCandidates').onSnapshot(snap => {
-                snap.docChanges().forEach(change => {
-                    if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
-                });
-            });
+            await pc.setRemoteDescription(new RTCSessionDescription(snap.data().offer));
+            const ans = await pc.createAnswer();
+            await pc.setLocalDescription(ans);
+            await ref.update({ answer: { sdp: ans.sdp, type: ans.type } });
         };
 
-        function setupChannel(channel) {
-            channel.onopen = () => {
-                document.getElementById('setupArea').classList.add('hidden');
-                document.getElementById('transferArea').classList.remove('hidden');
-                document.getElementById('status').innerText = "🟢 P2P Active";
-            };
-        }
-
-        // CHUNKED FILE SENDER (For 100GB stability)
-        document.getElementById('fileInput').onchange = (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            // Send metadata first
-            dataChannel.send(JSON.stringify({ name: file.name, size: file.size }));
-
-            const chunkSize = 64 * 1024; // 64KB chunks
+        document.getElementById('file').onchange = (e) => {
+            const f = e.target.files[0];
+            dc.send(JSON.stringify({ name: f.name, size: f.size }));
+            
+            const chunk = 64 * 1024; // 64KB chunks
             let offset = 0;
             const reader = new FileReader();
 
-            reader.onload = (event) => {
-                dataChannel.send(event.target.result);
-                offset += event.target.result.byteLength;
-
-                const percent = ((offset / file.size) * 100).toFixed(2);
-                document.getElementById('progressBar').value = percent;
-                document.getElementById('progressLabel').innerText = `Sending: ${percent}%`;
-
-                if (offset < file.size) {
-                    // Check if channel buffer is full to avoid crashing
-                    if (dataChannel.bufferedAmount > 16 * 1024 * 1024) {
-                        setTimeout(readNextChunk, 100);
-                    } else {
-                        readNextChunk();
-                    }
-                } else {
-                    document.getElementById('progressLabel').innerText = "✅ Done! Check Mac Downloads.";
-                }
+            reader.onload = (ev) => {
+                dc.send(ev.target.result);
+                offset += ev.target.result.byteLength;
+                document.getElementById('pg').value = (offset/f.size)*100;
+                document.getElementById('lab').innerText = `Sending: ${((offset/f.size)*100).toFixed(1)}%`;
+                if (offset < f.size) read();
             };
-
-            function readNextChunk() {
-                const slice = file.slice(offset, offset + chunkSize);
-                reader.readAsArrayBuffer(slice);
-            }
-
-            readNextChunk();
+            const read = () => reader.readAsArrayBuffer(f.slice(offset, offset + chunk));
+            read();
         };
     </script>
 </body>
